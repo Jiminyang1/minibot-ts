@@ -142,6 +142,14 @@ export class AgentSession {
 		return true;
 	}
 
+	/** Manual compaction of an idle session; undefined when nothing can be cut. */
+	async compact(sessionId: string): Promise<string | undefined> {
+		if (this.isBusy(sessionId)) throw new SessionBusyError(`会话 ${sessionId} 正在运行,稍后再压缩。`);
+		const session = this.deps.store.resolve(sessionId);
+		const tokens = this.deps.budget.estimate(session, estimateTokens(this.deps.context.systemPrompt(new Date())));
+		return this.deps.compactor.compact(session, tokens);
+	}
+
 	/** Run one user turn. `target`: a session id, "current", or empty for a new session. */
 	async prompt(target: string | undefined, input: string, options: PromptOptions): Promise<TurnOutcome> {
 		const session = this.deps.store.resolve(target);
