@@ -1,0 +1,11 @@
+{
+  "name": "minibot-ts-spike",
+  "private": true,
+  "type": "module",
+  "description": "Step 0: verify pi-ai + pi-agent-core against MiniBot's requirements",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.0.0",
+    "@earendil-works/pi-ai": "^1.0.0",
+    "typebox": "^1.3.34"
+  }
+}
