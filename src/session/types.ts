@@ -84,3 +84,8 @@ export function toolCalls(message: ChatMessage): { id: string; name: string; arg
 	if (message.role !== "assistant") return [];
 	return message.content.flatMap((block) => (block.type === "toolCall" ? [block] : []));
 }
+
+/** Usage of a message no model produced. */
+export function emptyUsage(): AssistantMessage["usage"] {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+}

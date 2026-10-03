@@ -165,11 +165,14 @@ describe("AgentSession", () => {
 		expect(faux.getPendingResponseCount()).toBe(1);
 	});
 
-	it("fails on an empty reply", async () => {
+	it("fails on an empty reply, which is not stored, and closes the turn", async () => {
 		const { runtime, faux, events } = await testRuntime();
 		faux.setResponses([fauxAssistantMessage([fauxText("")])]);
 		await expect(runtime.session.prompt(undefined, "?", { source: "cli" })).rejects.toThrow("空回复");
 		expect(events.at(-1)?.type).toBe("run.failed");
+		const messages = runtime.store.load(events[0].sessionId)?.messages() ?? [];
+		expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+		expect(messageText(messages[1])).toContain("没有完成");
 	});
 
 	it("retries a call that failed before any output", async () => {
@@ -182,15 +185,46 @@ describe("AgentSession", () => {
 		const outcome = await runtime.session.prompt(undefined, "hi", { source: "cli" });
 		expect(outcome.reply).toBe("恢复了");
 		expect(eventTypes(events)).toContain("model.retrying");
+		// The retry happens inside the stream: still one request.
+		expect(eventTypes(events).filter((type) => type === "model.started")).toHaveLength(1);
 		expect(Date.now() - started).toBeGreaterThanOrEqual(900);
 		const session = runtime.store.load(outcome.sessionId);
 		expect(session?.messages().map((m) => m.role)).toEqual(["user", "assistant"]);
 	});
 
-	it("does not retry a failure that is not transient", async () => {
-		const { runtime, faux } = await testRuntime();
+	it("does not retry a failure that is not transient, and closes the turn", async () => {
+		const { runtime, faux, events } = await testRuntime();
 		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 invalid request" })]);
 		await expect(runtime.session.prompt(undefined, "hi", { source: "cli" })).rejects.toThrow("400 invalid request");
+		// Without the closing reply, the next turn would see an unanswered request.
+		const messages = runtime.store.load(events[0].sessionId)?.messages() ?? [];
+		expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+		expect(messageText(messages[1])).toContain("400 invalid request");
+	});
+
+	it("does not retry once output reached the user", async () => {
+		const { runtime, faux, events } = await testRuntime({ maxRetries: 2 });
+		faux.setResponses([fauxAssistantMessage("半截", { stopReason: "error", errorMessage: "503 service unavailable" }), fauxAssistantMessage("不该出现")]);
+		await expect(runtime.session.prompt(undefined, "hi", { source: "cli" })).rejects.toThrow("503");
+		expect(eventTypes(events)).not.toContain("model.retrying");
+		expect(faux.getPendingResponseCount()).toBe(1);
+	});
+
+	it("cancels while waiting to retry", async () => {
+		const { runtime, faux, events } = await testRuntime({ maxRetries: 2 });
+		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "503 service unavailable" }), fauxAssistantMessage("不该出现")]);
+		const started = Date.now();
+		const run = runtime.session.prompt(undefined, "hi", {
+			source: "cli",
+			runId: "r_test_retry_cancel",
+			onEvent: (event) => {
+				if (event.type === "model.retrying") runtime.session.abort("r_test_retry_cancel");
+			},
+		});
+		await expect(run).rejects.toBeInstanceOf(RunCancelledError);
+		expect(Date.now() - started).toBeLessThan(900);
+		expect(events.at(-1)?.type).toBe("run.cancelled");
+		expect(faux.getPendingResponseCount()).toBe(1);
 	});
 
 	it("refuses a second turn on a busy session", async () => {

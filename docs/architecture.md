@@ -2,12 +2,13 @@
 
 ## 1. 分层
 
-引擎交给 pi,MiniBot 的概念留在自己手里。
+引擎交给 pi,MiniBot 的概念留在自己手里。pi 只提供不带状态的函数(循环和模型调用),所有状态都归 MiniBot。
 
 | 层 | 模块 | 职责 |
 |---|---|---|
-| 引擎 | `pi-ai`、`pi-agent-core` | 模型接入、流式输出、agent 循环、工具执行、取消 |
-| 运行时 | `src/runtime/agent-session.ts` | 一个会话同一时间只有一轮;写盘、事件翻译、审批、重试、请求次数上限 |
+| 引擎 | `pi-ai`、`pi-agent-core` 的 `runAgentLoop` | 模型接入、流式输出、agent 循环、工具执行 |
+| 运行时 | `src/runtime/agent-session.ts` | 一个会话同一时间只有一轮;写盘、事件翻译、审批、请求次数上限、收尾 |
+| | `src/runtime/retry-stream.ts` | 包住模型流:第一个输出之前失败就重试 |
 | | `src/runtime/context.ts` | 系统提示、请求里的时间标注、请求大小估算(`Budget`) |
 | | `src/runtime/compaction.ts` | 切点规划和摘要压缩 |
 | | `src/runtime/approval.ts` | 审批策略和 Web 用的审批会合点 |
@@ -27,12 +28,12 @@
 sequenceDiagram
     participant UI as 界面
     participant S as AgentSession
-    participant A as pi Agent
+    participant A as runAgentLoop
     participant P as provider
     participant T as 工具
     UI->>S: prompt(会话, 输入)
     S-->>UI: run.started, context.usage
-    S->>A: agent.prompt(用户消息)
+    S->>A: runAgentLoop(用户消息, 取消信号)
     A->>S: message_end(用户消息) → 写盘
     loop 每次模型请求
         A->>S: prepareRequest
@@ -57,9 +58,10 @@ sequenceDiagram
 
 几条关键约定:
 
-- **每次请求前都从会话重建上下文。** `prepareRequest` 返回的上下文替换 Agent 自己的:开头是一条系统消息,带系统提示和工具声明(`toolsAdded`),后面是会话投影,最新一条用户消息末尾附精确到分钟的时间。没有工具声明,模型会把工具调用写成正文。
-- **写盘在 Agent 的订阅者里完成。** Agent 会等订阅者跑完,所以消息落盘一定早于下一个工具执行和下一次请求。之后才把事件发给界面。
-- **失败和中止的回复不写盘。** 会话里只有完整的回复。
+- **每次请求前都从会话重建上下文。** `prepareRequest` 返回的上下文替换循环自己的:开头是一条系统消息,带系统提示和工具声明(`toolsAdded`),后面是会话投影,最新一条用户消息末尾附精确到分钟的时间。没有工具声明,模型会把工具调用写成正文。
+- **写盘在循环的事件接收函数里完成。** 循环会等它跑完,所以消息落盘一定早于下一个工具执行和下一次请求。之后才把事件发给界面。
+- **失败、中止和空的回复不写盘。** 会话里只有完整的回复。
+- **只有一个取消源。** 每个 run 一个 `AbortController`,循环、审批、工具和重试等待都看它的信号。
 
 ## 3. 会话记录和投影
 
@@ -69,7 +71,7 @@ sequenceDiagram
 
 1. 最新一条压缩记录之前、第一条保留消息之前的内容,换成一条摘要用户消息(`<conversation-summary>`)。
 2. 工具调用块必须完整。块在末尾且缺结果:可能还在执行,先不出现。块后面已有其他消息:产生它的运行已经结束,缺的结果补成 `interrupted`(副作用未知)。补的结果只在投影里,不改磁盘。
-3. 运行被取消时,追加一条固定回复"用户取消了这次请求",否则下一轮模型会把被取消的请求一起做掉。
+3. 一轮没有以模型的最终回复结束(取消、失败、达到请求次数上限)时,`#finish` 追加一条固定的收尾回复,否则下一轮模型会把没完成的请求一起做掉。
 
 ## 4. 事件
 
@@ -98,10 +100,11 @@ sequenceDiagram
 
 ## 6. 失败、重试和取消
 
-- **重试:** pi-ai 的请求级重试关掉(`maxRetries: 0`),只保留 MiniBot 一条规则:失败的回复没有任何输出(正文和思考都没有)、错误属于暂时性错误(`isRetryableAssistantError`),才指数退避重试,最多 `MINIBOT_MAX_RETRIES` 次。已经有输出再失败就不重试,因为用户已经看到了半截内容。
-- **取消:** `AgentSession.abort(runId)` 中止 Agent。正在等审批的会立刻结束;正在执行的工具收到取消信号,结果记为 `interrupted`。取消要以 MiniBot 自己的标记判断,不能看 `stopReason`:Agent 取消后会追加一条空的、`stopReason` 为 `error` 的回复(不写盘)。
-- **请求次数上限:** `finishTurn` 数请求次数,到 `MINIBOT_MAX_ITERATIONS` 后结束,写一条固定回复。
-- **空回复:** 没有工具调用也没有正文,本轮失败。
+- **重试:** pi-ai 的请求级重试关掉(`maxRetries: 0`),重试放在 `retry-stream.ts` 包装的模型流里。流事件先缓存,直到第一个让用户看到内容的事件(正文或思考增量、工具调用开始)。在这之前出现暂时性错误(`isRetryableAssistantError`),就丢掉这次尝试,指数退避后重新请求,最多 `MINIBOT_MAX_RETRIES` 次。循环看不到失败的尝试,所以重试不算新请求,也不占请求次数。已经有输出再失败就不重试,因为用户已经看到了半截内容。
+- **取消:** `AgentSession.abort(runId)` 中止这个 run 的信号。正在等审批或等重试的会立刻结束;正在执行的工具收到信号,结果记为 `interrupted`。是否取消只看这个信号,不看 `stopReason`。
+- **请求次数上限:** `finishTurn` 数请求次数,到 `MINIBOT_MAX_ITERATIONS` 后结束。
+- **空回复:** 没有工具调用也没有正文,不写盘,本轮失败。
+- **收尾:** 所有结局都经过 `#finish`。取消、失败、达到上限时写一条固定回复(已经以最终回复结束,或还没写入用户消息,就不写),然后发出 `run.completed`、`run.cancelled` 或 `run.failed`。
 
 ## 7. 审批
 
@@ -130,7 +133,8 @@ sequenceDiagram
 1. DeepSeek 的流式正文和思考增量都能收到;发起工具调用的那条回复,其 `reasoning_content` 会在下一次请求里回传;缓存命中数在 `usage.cacheRead`。
 2. pi-ai 只在拿到响应之前重试;流开始后出错不重试,半截内容留在消息里。pi 也不会在"有响应、无输出"时重试,所以这条重试由 MiniBot 自己做。
 3. `beforeToolCall` 能拿到取消信号,等审批时取消约 1 毫秒内结束,工具不会执行。
-4. Agent 会依次等待每个订阅者,写盘的订阅者完成后才执行工具、才发下一次请求。
+4. 循环会等待事件接收函数完成,写盘完成后才执行工具、才发下一次请求。
 5. 工具执行中取消,得到 `isError` 的工具结果,对话之后还能继续;没有结果的工具调用,pi-ai 会自己补一条 "No result provided"(MiniBot 的投影先补了 `interrupted`)。
 6. pi-ai 的 `usage.input` 不含缓存部分,MiniBot 的 `inputTokens` = `input + cacheRead + cacheWrite`。
 7. pi-ai 默认把 `max_tokens` 设为模型上限,MiniBot 每次请求都传配置的输出上限。
+8. `Agent` 类会捕获循环里抛出的异常,换成一条只带错误文字的失败消息,并且自己再存一份对话历史。MiniBot 不用这些状态,所以直接调用 `runAgentLoop`(`Agent` 就是包在它外面的一层):异常原样抛出,取消只用 MiniBot 自己的信号。(2026-10-03 改)
