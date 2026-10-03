@@ -61,20 +61,23 @@ export class ArtifactStore {
 	 */
 	materialize(output: ToolOutput, sessionId: string): ToolResult {
 		const data = { ...output.data };
-		const base = { ok: output.ok, code: output.code, data, artifact: null, truncated: output.truncated ?? false };
-		if (output.content === undefined) return { ...base, summary: output.summary };
+		// The summary comes right after the status: on failure it is what the model must read first.
+		const envelope = (summary: string, artifact: ArtifactRef | null, truncated: boolean): ToolResult => ({
+			ok: output.ok,
+			code: output.code,
+			summary,
+			data,
+			artifact,
+			truncated,
+		});
+		if (output.content === undefined) return envelope(output.summary, null, output.truncated ?? false);
 		if (output.content.length <= INLINE_CHARS) {
 			data.content = output.content;
-			return { ...base, summary: output.summary };
+			return envelope(output.summary, null, output.truncated ?? false);
 		}
 		const artifact = this.put(sessionId, output.content, output.contentKind ?? "text", output.contentName ?? null);
 		data.preview = output.content.slice(0, PREVIEW_CHARS);
-		return {
-			...base,
-			summary: `${output.summary.replace(/。$/, "")}(结果较大,已返回预览并保存为 artifact)。`,
-			artifact,
-			truncated: true,
-		};
+		return envelope(`${output.summary.replace(/。$/, "")}(结果较大,已返回预览并保存为 artifact)。`, artifact, true);
 	}
 
 	#path(sessionId: string, id: string): string {

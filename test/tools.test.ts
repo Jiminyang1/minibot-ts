@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ArtifactStore, readArtifactTool } from "../src/tools/artifacts.ts";
 import { dangerReason, execTool } from "../src/tools/exec.ts";
 import { editFileTool, globToRegExp, listDirTool, readFileTool, searchFilesTool, writeFileTool } from "../src/tools/files.ts";
-import { classifyScriptError, localDateParts, parseRecords } from "../src/tools/macos.ts";
+import { appToLaunch, classifyScriptError, localDateParts, parseRecords } from "../src/tools/macos.ts";
 import { MemoryStore } from "../src/tools/memory.ts";
 import type { ToolOutput } from "../src/tools/result.ts";
 import { parseSkill, SkillRegistry } from "../src/tools/skills.ts";
@@ -173,6 +173,13 @@ describe("macOS bridge helpers", () => {
 		expect(classifyScriptError("Can’t get calendar \"x\". (-1728)")).toBe("not_found");
 		expect(localDateParts("2026-04-20T09:05", "start_at")).toEqual(["2026", "4", "20", "9", "5", "0"]);
 		expect(() => localDateParts("tomorrow", "start_at")).toThrow();
+	});
+
+	it("launches the script's app only when the app is not running", () => {
+		const lines = ["on run argv", 'tell application "Reminders"', "end tell", "end run"];
+		expect(appToLaunch(lines, "Reminders got an error: Application isn’t running. (-600)")).toBe("Reminders");
+		expect(appToLaunch(lines, "Not authorized to send Apple events to Reminders. (-1743)")).toBeNull();
+		expect(appToLaunch(["on run argv", "end run"], "(-600)")).toBeNull();
 	});
 });
 

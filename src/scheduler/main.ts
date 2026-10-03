@@ -29,8 +29,16 @@ function claimPidFile(path: string): boolean {
 	return false;
 }
 
+const USAGE = "用法: minibot-daemon [--workspace DIR]";
+
 async function main(): Promise<number> {
-	const { values } = parseArgs({ options: { workspace: { type: "string" } } });
+	let values: { workspace?: string };
+	try {
+		values = parseArgs({ options: { workspace: { type: "string" } } }).values;
+	} catch (error) {
+		console.error(`${errorMessage(error)}\n\n${USAGE}`);
+		return 2;
+	}
 	const log = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
 	let config: ReturnType<typeof loadConfig>;
 	try {

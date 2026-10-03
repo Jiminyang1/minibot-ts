@@ -79,6 +79,8 @@ npm link
 
 工具和命令只能访问启动时的工作目录;会话、记忆和定时任务是全局的,存在数据目录里。
 
+macOS 工具第一次访问某个 App 时,系统会请求自动化权限。App 没有运行时,工具会在后台打开它,然后重试一次。
+
 ## MCP
 
 在 `$MINIBOT_HOME/mcp.json` 里配置 MCP server,工具以 `mcp__<server>__<tool>` 的名字出现。未标 `trusted` 的 server,工具调用需要审批。

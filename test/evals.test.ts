@@ -84,14 +84,14 @@ describe("sandbox", () => {
 		]);
 		const config = testConfig();
 		const result = await runCase(
-			{ prompt: "明天下午三点提醒我交周报", files: { "notes.txt": "笔记" }, toolResults: { reminders_create: { sequence: [{ error: "Application isn’t running (-600)" }] } } },
+			{ prompt: "明天下午三点提醒我交周报", files: { "notes.txt": "笔记" }, toolResults: { reminders_create: { sequence: [{ error: "Not authorized to send Apple events to Reminders. (-1743)" }] } } },
 			config,
 			models,
 		);
 		expect(result.error).toBeNull();
 		expect(result.reply).toBe("已创建提醒。");
 		expect(result.toolCalls.map((call) => [call.name, call.code])).toEqual([
-			["reminders_create", "error"],
+			["reminders_create", "permission_denied"],
 			["read_file", "success"],
 		]);
 		expect(result.files).toEqual({ "notes.txt": "笔记" });

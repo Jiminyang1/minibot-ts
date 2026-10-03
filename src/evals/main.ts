@@ -15,14 +15,23 @@ import { langfuseConfigured, startTracing } from "../runtime/tracing.ts";
 import { errorMessage } from "../util.ts";
 import { formatTable, gitRevision, loadCases, runExperiment, runLocal, syncDataset } from "./runner.ts";
 
+const USAGE = "用法: minibot-evals sync | run [--case ID]... [--name NAME] [--local]";
+
 async function main(): Promise<number> {
-	const { values, positionals } = parseArgs({
-		allowPositionals: true,
-		options: { case: { type: "string", multiple: true }, name: { type: "string" }, local: { type: "boolean" } },
-	});
+	let parsed: { values: { case?: string[]; name?: string; local?: boolean }; positionals: string[] };
+	try {
+		parsed = parseArgs({
+			allowPositionals: true,
+			options: { case: { type: "string", multiple: true }, name: { type: "string" }, local: { type: "boolean" } },
+		});
+	} catch (error) {
+		console.error(`${errorMessage(error)}\n\n${USAGE}`);
+		return 2;
+	}
+	const { values, positionals } = parsed;
 	const command = positionals[0];
 	if (command !== "sync" && command !== "run") {
-		console.error("用法: minibot-evals sync | run [--case ID]... [--name NAME] [--local]");
+		console.error(USAGE);
 		return 2;
 	}
 	let config: ReturnType<typeof loadConfig>;

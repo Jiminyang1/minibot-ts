@@ -2,9 +2,12 @@
 //
 // Each operation is one script run with `on run argv`; values travel as
 // arguments, never spliced into the script. Records come back joined with
-// ASCII unit (31) and record (30) separators.
+// ASCII unit (31) and record (30) separators. An app that is not running
+// (-600) is opened in the background and the script runs once more.
 
 import { execFile } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { Type } from "typebox";
 import { failure, success, type ToolCode, type ToolOutput } from "./result.ts";
 import { defineTool, type Tool } from "./tool.ts";
@@ -12,6 +15,9 @@ import { defineTool, type Tool } from "./tool.ts";
 const FIELD = String.fromCharCode(31);
 const RECORD = String.fromCharCode(30);
 const TIMEOUT_MS = 20_000;
+/** `open` returns before the app accepts Apple events. */
+const LAUNCH_SETTLE_MS = 1_000;
+const execFileAsync = promisify(execFile);
 
 const HELPERS = [
 	"on pad2(n)",
@@ -98,7 +104,7 @@ export function classifyScriptError(detail: string): ToolCode {
 	return "error";
 }
 
-function runScript(lines: string[], args: string[], signal: AbortSignal): Promise<string> {
+function osascript(lines: string[], args: string[], signal: AbortSignal): Promise<string> {
 	const argv = ["-l", "AppleScript", ...[...HELPERS, ...lines].flatMap((line) => ["-e", line]), "--", ...args];
 	return new Promise((resolve, reject) => {
 		execFile("osascript", argv, { timeout: TIMEOUT_MS, signal, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -118,6 +124,29 @@ function runScript(lines: string[], args: string[], signal: AbortSignal): Promis
 			resolve(stdout.replace(/[\r\n]+$/, ""));
 		});
 	});
+}
+
+/** The app a failed script must launch first: its target, when the failure is -600. */
+export function appToLaunch(lines: readonly string[], detail: string): string | null {
+	if (!detail.includes("-600") && !/isn[’']t running/i.test(detail)) return null;
+	for (const line of lines) {
+		const target = /^tell application "([^"]+)"$/.exec(line)?.[1];
+		if (target) return target;
+	}
+	return null;
+}
+
+/** Run a script. When its app is not running, open the app in the background and run the script once more. */
+async function runScript(lines: string[], args: string[], signal: AbortSignal): Promise<string> {
+	try {
+		return await osascript(lines, args, signal);
+	} catch (error) {
+		const app = error instanceof ScriptError ? appToLaunch(lines, error.message) : null;
+		if (!app) throw error;
+		await execFileAsync("open", ["-g", "-a", app], { signal });
+		await delay(LAUNCH_SETTLE_MS, undefined, { signal });
+		return osascript(lines, args, signal);
+	}
 }
 
 export function parseRecords<K extends string>(raw: string, fields: readonly K[]): Record<K, string>[] {

@@ -7,8 +7,21 @@ import { buildRuntime } from "../runtime/bootstrap.ts";
 import { errorMessage } from "../util.ts";
 import { createApp, webAssets } from "./app.ts";
 
+const USAGE = "用法: minibot-server [--host 127.0.0.1] [--port 8765]";
+
 async function main(): Promise<void> {
-	const { values } = parseArgs({ options: { host: { type: "string", default: "127.0.0.1" }, port: { type: "string", default: "8765" } } });
+	let values: { host: string; port: string };
+	try {
+		values = parseArgs({ options: { host: { type: "string", default: "127.0.0.1" }, port: { type: "string", default: "8765" } } }).values;
+	} catch (error) {
+		console.error(`${errorMessage(error)}\n\n${USAGE}`);
+		process.exit(2);
+	}
+	const port = Number(values.port);
+	if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+		console.error(`端口无效: ${values.port}\n\n${USAGE}`);
+		process.exit(2);
+	}
 	const broker = new ApprovalBroker();
 	let runtime: Awaited<ReturnType<typeof buildRuntime>>;
 	try {
@@ -18,7 +31,7 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 	const server = createApp(runtime, broker, await webAssets());
-	server.listen(Number(values.port), values.host, () => console.log(`MiniBot web: http://${values.host}:${values.port}/`));
+	server.listen(port, values.host, () => console.log(`MiniBot web: http://${values.host}:${port}/`));
 	const shutdown = () => {
 		server.close();
 		void runtime.close().finally(() => process.exit(0));

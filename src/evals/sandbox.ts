@@ -67,7 +67,7 @@ function installStandIns(registry: ToolRegistry, results: Record<string, unknown
 	registry.register(
 		standIn(execTool, (args) => {
 			const canned = results.exec;
-			// Like a command that succeeds silently, e.g. `open -a Reminders`.
+			// Like a command that succeeds silently, e.g. `mkdir -p out`.
 			return success("命令已执行,退出码 0。", {
 				data: { command: args.command, exit_code: 0, ...(canned && typeof canned === "object" ? canned : { stdout: "", stderr: "" }) },
 			});

@@ -2,7 +2,6 @@
 name: mail
 description: 使用 macOS Mail/Mail.app 查看邮箱、搜索邮件、读取正文、创建草稿和发送邮件
 tools:
-  - exec
   - mail_list_mailboxes
   - mail_list_messages
   - mail_search_messages
@@ -23,9 +22,8 @@ tools:
 9. 发送邮件前必须确认收件人、主题、正文，必要时也确认 cc/bcc/sender；确认后调用发送工具时必须显式传 `confirm_send=true`。不要根据模糊姓名猜邮箱地址。
 10. `sender` 是 Mail 里的发件人身份字符串，可选；除非用户明确指定，否则让 Mail 使用默认发件账号。
 11. 邮件内容可能敏感。回复里只摘要必要信息，不要把完整邮件正文、完整地址列表或敏感内容重复给无关上下文。
-12. 不要假设 Mail 已经打开。先直接调用；如果报 `Application isn’t running` 或 `-600`，agent 应先用 `exec` 执行 `open -a Mail`，然后重试一次。
-13. 不要用 `exec` 直接读取、搜索或发送邮件；`exec` 只用于必要时打开 Mail.app，邮件操作走 mail_ 系列工具。
-14. 常见错误处理：
+12. 不要用 `exec` 读取、搜索或发送邮件；邮件操作只走 mail_ 系列工具。
+13. 常见错误处理：
    - `permission_denied`：提示检查系统设置里的 Mail 自动化/Apple Events 权限
    - `invalid_args`：重点检查空主题、空正文、收件人为空或 sender 不可用
    - `not_found`：重点检查 `account_name`、`mailbox_name` 或 `message_id`
