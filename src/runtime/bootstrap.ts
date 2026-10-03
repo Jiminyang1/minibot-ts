@@ -24,6 +24,7 @@ import { Compactor } from "./compaction.ts";
 import { Budget, ContextBuilder } from "./context.ts";
 import type { EventHandler } from "./events.ts";
 import { RunLog } from "./run-log.ts";
+import { startTracing } from "./tracing.ts";
 
 export const SKILLS_DIR = fileURLToPath(new URL("../../skills", import.meta.url));
 
@@ -55,7 +56,7 @@ export interface RuntimeOptions {
 	models?: Models;
 	/** Connect MCP servers (default true). */
 	mcp?: boolean;
-	/** Extra always-on event subscribers, such as tracing. */
+	/** Extra always-on event subscribers. */
 	subscribers?: EventHandler[];
 }
 
@@ -119,6 +120,7 @@ export async function buildRuntime(config: Config, options: RuntimeOptions = {})
 	const compactor = new Compactor({ store, models, model, keepRecentTokens: config.keepRecentTokens, maxOutputTokens });
 	const approval = new ApprovalPolicy(config.approval, options.approval);
 	const runLog = new RunLog(layout.runs);
+	const tracing = await startTracing((message) => notes.push(message));
 	const session = new AgentSession({
 		config: effective,
 		models,
@@ -130,7 +132,7 @@ export async function buildRuntime(config: Config, options: RuntimeOptions = {})
 		budget,
 		compactor,
 		approval,
-		subscribers: [runLog.handle, ...(options.subscribers ?? [])],
+		subscribers: [runLog.handle, ...(tracing ? [tracing.handle] : []), ...(options.subscribers ?? [])],
 	});
 
 	return {
@@ -151,6 +153,9 @@ export async function buildRuntime(config: Config, options: RuntimeOptions = {})
 		approval,
 		session,
 		notes,
-		close: () => mcp.close(),
+		close: async () => {
+			await mcp.close();
+			await tracing?.flush();
+		},
 	};
 }
