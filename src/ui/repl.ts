@@ -179,6 +179,9 @@ class LineQueue {
 	}
 
 	answer(signal: AbortSignal): Promise<string> {
+		// Piped input arrives ahead of the question; the next line is still the answer.
+		const buffered = this.#lines.shift();
+		if (buffered !== undefined) return Promise.resolve(buffered);
 		return new Promise((resolve) => {
 			if (this.#closed || signal.aborted) {
 				resolve("");
