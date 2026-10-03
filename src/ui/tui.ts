@@ -2,7 +2,8 @@
 // the editor and status line sit below it.
 //
 // Keys: Enter sends, Esc cancels a running turn, Ctrl+O shows or hides
-// reasoning, Ctrl+C clears the editor (or cancels, or quits), Ctrl+D quits.
+// reasoning, Ctrl+N starts a new session, Ctrl+C clears the editor (or
+// cancels, or quits), Ctrl+D quits.
 
 import {
 	CombinedAutocompleteProvider,
@@ -358,6 +359,10 @@ export async function runTui(runtime: Runtime, options: { verbose: boolean }): P
 			if (editor.getText()) editor.setText("");
 			else if (running) runtime.session.abort(running);
 			else quit();
+			return { consume: true };
+		}
+		if (matchesKey(data, "ctrl+n") && !running) {
+			void submit("/new");
 			return { consume: true };
 		}
 		if (matchesKey(data, "ctrl+d") && !editor.getText()) {
