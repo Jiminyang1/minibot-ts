@@ -32,13 +32,14 @@ describe("AgentSession", () => {
 
 	it("sends the system prompt and stamps the latest user message", async () => {
 		const { runtime, faux } = await testRuntime();
-		let seen: { system: string; last: string } | undefined;
+		let seen: { system: string; tools: string[]; last: string } | undefined;
 		faux.setResponses([
 			(context) => {
 				const system = context.messages[0];
 				const last = context.messages.at(-1);
 				seen = {
-					system: typeof system.content === "string" ? system.content : "",
+					system: system.role === "system" && typeof system.content === "string" ? system.content : "",
+					tools: system.role === "system" ? (system.toolsAdded ?? []).map((tool) => tool.name) : [],
 					last: last && last.role === "user" ? (typeof last.content === "string" ? last.content : "") : "",
 				};
 				return fauxAssistantMessage("ok");
@@ -46,6 +47,8 @@ describe("AgentSession", () => {
 		]);
 		const outcome = await runtime.session.prompt(undefined, "现在几点", { source: "cli" });
 		expect(seen?.system).toContain("## Local Time Context");
+		// Tools are declared on the leading system message, or the model never sees them.
+		expect(seen?.tools).toContain("read_file");
 		expect(seen?.last).toMatch(/^现在几点\n\n\[当前本地时间 \d{4}-\d{2}-\d{2} \d{2}:\d{2} /);
 		// The stamp is request-only: the session keeps what the user typed.
 		const stored = runtime.store.load(outcome.sessionId)?.messages()[0];

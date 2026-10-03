@@ -12,7 +12,16 @@
 //   - translation of Agent events into MiniBot's RuntimeEvent stream.
 
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
-import { type Api, type AssistantMessage, isRetryableAssistantError, type Message, type Model, type Models } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	isRetryableAssistantError,
+	type Message,
+	type Model,
+	type Models,
+	type Tool as ToolDeclaration,
+	toToolDeclaration,
+} from "@earendil-works/pi-ai";
 import type { Config } from "../config.ts";
 import type { Session, SessionStore } from "../session/store.ts";
 import { type ChatMessage, messageText, thinkingText, toolCalls } from "../session/types.ts";
@@ -173,7 +182,8 @@ export class AgentSession {
 			fatal: undefined,
 		};
 		const tools = this.#agentTools(session, run);
-		const toolTokens = estimateTokens(JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters }))));
+		const declarations = tools.map(toToolDeclaration);
+		const toolTokens = estimateTokens(JSON.stringify(declarations));
 		const fixedTokens = (now: Date) => estimateTokens(context.systemPrompt(now)) + toolTokens;
 
 		emitter.emit("context.usage", {
@@ -190,7 +200,7 @@ export class AgentSession {
 			toolExecution: "parallel",
 			prepareRequest: async (_request, signal) => {
 				try {
-					return { context: { messages: await this.#request(session, state, emitter, fixedTokens, signal), tools } };
+					return { context: { messages: await this.#request(session, state, emitter, fixedTokens, declarations, signal), tools } };
 				} catch (error) {
 					state.fatal = error;
 					throw error;
@@ -244,6 +254,7 @@ export class AgentSession {
 		state: TurnState,
 		emitter: EventEmitter,
 		fixedTokens: (now: Date) => number,
+		declarations: ToolDeclaration[],
 		signal: AbortSignal | undefined,
 	): Promise<Message[]> {
 		const { budget, compactor, context } = this.deps;
@@ -258,7 +269,9 @@ export class AgentSession {
 			}
 			if (tokens > budget.hardLimit) throw new Error("当前上下文仍然超过模型输入上限,请用 /compact 压缩或开启新会话后重试。");
 		}
-		const messages: Message[] = [{ role: "system", content: context.systemPrompt(now), timestamp: now.getTime() }, ...context.requestMessages(session.messages(), now)];
+		// The leading system message carries the prompt and the tool declarations.
+		const system: Message = { role: "system", content: context.systemPrompt(now), toolsAdded: declarations, timestamp: 0 };
+		const messages: Message[] = [system, ...context.requestMessages(session.messages(), now)];
 		state.iteration += 1;
 		state.visibleOutput = false;
 		state.requestStartedAt = performance.now();
@@ -266,7 +279,7 @@ export class AgentSession {
 			iteration: state.iteration,
 			model: this.modelLabel,
 			messages,
-			tools: this.deps.tools.list().map((tool) => tool.name),
+			tools: declarations.map((tool) => tool.name),
 		});
 		return messages;
 	}
