@@ -144,9 +144,12 @@ describe("AgentSession", () => {
 		expect(runtime.session.abort("r_test_cancel")).toBe(true);
 		await expect(run).rejects.toBeInstanceOf(RunCancelledError);
 		expect(events.at(-1)?.type).toBe("run.cancelled");
-		// The session stays well-formed: every call has a result.
+		// The session stays well-formed (every call has a result) and closes the
+		// turn, so the model will not carry out the cancelled request later.
 		const session = runtime.store.load(events[0].sessionId);
-		expect(session?.messages().map((m) => m.role)).toEqual(["user", "assistant", "toolResult"]);
+		const messages = session?.messages() ?? [];
+		expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		expect(messageText(messages[3])).toContain("取消");
 		expect(runtime.session.isBusy()).toBe(false);
 	});
 

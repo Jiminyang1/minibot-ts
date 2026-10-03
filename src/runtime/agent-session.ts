@@ -94,6 +94,8 @@ interface TurnState {
 }
 
 const LIMIT_REPLY = "抱歉,工具调用轮次已达上限,请简化问题后重试。";
+/** Closes a cancelled turn, so the model does not carry out the request later. */
+const CANCELLED_REPLY = "(用户取消了这次请求,它没有完成;除非用户再次要求,不要继续做。)";
 
 export function makeRunId(date = new Date()): string {
 	const pad = (n: number) => String(n).padStart(2, "0");
@@ -166,6 +168,10 @@ export class AgentSession {
 			return outcome;
 		} catch (error) {
 			if (run.controller.signal.aborted) {
+				const last = session.messages().at(-1);
+				if (last && !(last.role === "assistant" && last.stopReason === "stop")) {
+					this.deps.store.appendMessage(session, this.#fixedReply(CANCELLED_REPLY));
+				}
 				emitter.emit("run.cancelled", {});
 				throw new RunCancelledError();
 			}
@@ -202,7 +208,8 @@ export class AgentSession {
 		});
 
 		const agent = new Agent({
-			initialState: { model, thinkingLevel: config.thinking, tools, messages: session.messages(), systemPrompt: context.systemPrompt(new Date()) },
+			// The request itself is rebuilt from the session in prepareRequest.
+			initialState: { model, thinkingLevel: config.thinking, tools },
 			streamFn: (m, c, o) => models.streamSimple(m, c, { ...o, maxTokens: config.maxOutputTokens, maxRetries: 0 }),
 			sessionId: session.id,
 			toolExecution: "parallel",
@@ -238,22 +245,27 @@ export class AgentSession {
 			throw new Error(last.errorMessage ?? "模型调用失败。");
 		}
 		if (state.hitLimit) {
-			const reply: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: LIMIT_REPLY }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				usage: zeroUsage(),
-				stopReason: "stop",
-				timestamp: Date.now(),
-			};
-			store.appendMessage(session, reply);
+			store.appendMessage(session, this.#fixedReply(LIMIT_REPLY));
 			emitter.emit("message.completed", { content: LIMIT_REPLY, reason: "max_iterations" });
 			state.reply = LIMIT_REPLY;
 		}
 		if (!state.reply) throw new Error("模型返回空回复,请重试。");
 		return { runId: run.runId, sessionId: session.id, reply: state.reply, didCompact: state.didCompact };
+	}
+
+	/** A reply MiniBot writes itself, not the model. */
+	#fixedReply(text: string): AssistantMessage {
+		const { model } = this.deps;
+		return {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
 	}
 
 	/** Build the next request from the session, compacting first when it is too big. */
