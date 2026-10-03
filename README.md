@@ -46,6 +46,7 @@ npm link
 | `MINIBOT_APPROVAL` | `ask` | `ask`:敏感工具先问;`always`:自动批准 |
 | `MINIBOT_MAX_ITERATIONS` | `20` | 一轮对话里最多的模型请求次数 |
 | `MINIBOT_MAX_RETRIES` | `3` | 模型还没输出任何内容就失败时的重试次数 |
+| `MINIBOT_HEARTBEAT_HOURS` | 全天 | 心跳的活跃时段,例如 `08:00-23:00`;可以跨午夜,例如 `22:00-06:00` |
 | `MINIBOT_HOME` | `~/.minibot` | 数据目录 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | — | 设置后启用 Langfuse 追踪;`MINIBOT_LANGFUSE=0` 关闭 |
 
@@ -101,7 +102,8 @@ macOS 工具第一次访问某个 App 时,系统会请求自动化权限。App �
 直接用自然语言让 MiniBot 创建,例如"每天早上 8 点给我生成今日简报"。`minibot-daemon` 到点以无人值守方式执行:
 
 - 普通任务在新会话里运行,结果通过 macOS 通知送达。
-- 心跳任务在同一个会话里反复巡逻,按 `$MINIBOT_HOME/HEARTBEAT.md` 里的清单检查;没有需要你注意的事就保持安静。
+- 心跳任务按 `$MINIBOT_HOME/HEARTBEAT.md` 里的清单巡逻。每次巡逻都从干净的上下文开始,只带上次巡逻留下的一段笔记,所以花费不会随时间增长;完整记录仍然留在心跳会话里。巡逻结束时模型调用 `heartbeat_respond`,决定通不通知你,并更新笔记(比如记下已经提醒过的事,避免重复提醒)。模型忘了调用时,按需要提醒处理,不会漏掉提醒。
+- 清单为空,或者当前时间不在 `MINIBOT_HEARTBEAT_HOURS` 之内,心跳直接跳过,不调用模型。
 - 错过的触发在 1 小时内会补跑,更早的记为 missed。
 - 没有人可以审批,所以敏感工具一律拒绝。
 

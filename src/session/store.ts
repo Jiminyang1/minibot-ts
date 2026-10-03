@@ -142,6 +142,19 @@ export class SessionStore {
 		this.append(session, { type: "message", id: shortId("m"), createdAt: nowIso(), message });
 	}
 
+	/** Start a new context: from here on the model sees only `handoff`; the log keeps everything. */
+	reset(session: Session, handoff: string, tokensBefore: number): void {
+		this.append(session, {
+			type: "compaction",
+			id: shortId("c"),
+			createdAt: nowIso(),
+			summary: handoff,
+			firstKeptId: null,
+			tokensBefore,
+			details: { readFiles: [], modifiedFiles: [] },
+		});
+	}
+
 	rename(session: Session, title: string): void {
 		session.meta = { ...session.meta, title, updatedAt: nowIso() };
 		this.#writeMeta(session.meta);

@@ -10,6 +10,12 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export type ApprovalMode = "ask" | "always";
 
+/** A daily window in minutes after local midnight; `end` before `start` wraps past midnight. */
+export interface ActiveHours {
+	start: number;
+	end: number;
+}
+
 export interface Config {
 	home: string;
 	workspace: string;
@@ -29,6 +35,8 @@ export interface Config {
 	maxIterations: number;
 	/** Retries for a model call that failed before any output arrived. */
 	maxRetries: number;
+	/** Heartbeats run only inside this window; undefined runs them all day. */
+	heartbeatHours: ActiveHours | undefined;
 }
 
 export interface Paths {
@@ -124,11 +132,29 @@ export function loadConfig(options: { env?: NodeJS.ProcessEnv; workspace?: strin
 		approval,
 		maxIterations: positiveInt(env, "MINIBOT_MAX_ITERATIONS") ?? 20,
 		maxRetries: nonNegativeInt(env, "MINIBOT_MAX_RETRIES") ?? 3,
+		heartbeatHours: parseActiveHours(env.MINIBOT_HEARTBEAT_HOURS),
 	};
 	if (config.compactThreshold !== undefined && config.keepRecentTokens >= config.compactThreshold) {
 		throw new ConfigError("MINIBOT_KEEP_RECENT_TOKENS 必须小于 MINIBOT_COMPACT_THRESHOLD。");
 	}
 	return config;
+}
+
+/** "08:00-23:00" → minutes after midnight; empty means all day. */
+export function parseActiveHours(raw: string | undefined): ActiveHours | undefined {
+	const text = raw?.trim();
+	if (!text) return undefined;
+	const match = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec(text);
+	const [start, end] = match ? [Number(match[1]) * 60 + Number(match[2]), Number(match[3]) * 60 + Number(match[4])] : [-1, -1];
+	if (!match || Number(match[2]) > 59 || Number(match[4]) > 59 || start > 24 * 60 || end > 24 * 60 || start === end) {
+		throw new ConfigError(`MINIBOT_HEARTBEAT_HOURS 必须是 HH:MM-HH:MM 形式且起止不同,例如 08:00-23:00;收到 "${text}"。`);
+	}
+	return { start, end };
+}
+
+export function inActiveHours(hours: ActiveHours, date: Date): boolean {
+	const minute = date.getHours() * 60 + date.getMinutes();
+	return hours.start < hours.end ? minute >= hours.start && minute < hours.end : minute >= hours.start || minute < hours.end;
 }
 
 function positiveInt(env: NodeJS.ProcessEnv, name: string): number | undefined {

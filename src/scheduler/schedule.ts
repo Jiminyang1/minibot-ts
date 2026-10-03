@@ -26,6 +26,8 @@ export interface ScheduledTask {
 	workspace: string;
 	/** Heartbeat only: the session every patrol reuses. */
 	sessionId: string | null;
+	/** Heartbeat only: the note one patrol leaves for the next; each patrol starts from it alone. */
+	scratch: string;
 }
 
 // ── cron ──────────────────────────────────────────────────────────
@@ -166,6 +168,7 @@ function isTask(value: unknown): value is ScheduledTask {
 		typeof value.expr === "string" &&
 		typeof value.createdAt === "string" &&
 		typeof value.failures === "number" &&
+		typeof value.scratch === "string" &&
 		(value.kind === "cron" || value.kind === "once" || value.kind === "heartbeat")
 	);
 }
@@ -207,6 +210,7 @@ export class ScheduleStore {
 			failures: 0,
 			workspace: input.workspace,
 			sessionId: null,
+			scratch: "",
 		};
 		this.#update((tasks) => [...tasks, task]);
 		return task;

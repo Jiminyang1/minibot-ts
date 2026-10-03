@@ -1,9 +1,10 @@
 import { writeFileSync } from "node:fs";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { type Context, fauxAssistantMessage, fauxToolCall, type JsonObject } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { type ActiveHours, inActiveHours, parseActiveHours } from "../src/config.ts";
 import { AGENT_LABEL, agentPlist } from "../src/scheduler/launchd.ts";
 import { cronNext, nextRun, parseCron, shortestInterval } from "../src/scheduler/schedule.ts";
-import { HEARTBEAT_OK, Scheduler } from "../src/scheduler/scheduler.ts";
+import { Scheduler } from "../src/scheduler/scheduler.ts";
 import { messageText } from "../src/session/types.ts";
 import { sleep } from "../src/util.ts";
 import { testRuntime } from "./helpers.ts";
@@ -31,7 +32,7 @@ describe("cron", () => {
 	});
 });
 
-async function scheduled(reply: string, runTimeoutMs?: number) {
+async function scheduled(reply: string, options: { runTimeoutMs?: number; activeHours?: ActiveHours } = {}) {
 	const test = await testRuntime();
 	test.faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage(reply)));
 	const notes: string[] = [];
@@ -42,12 +43,18 @@ async function scheduled(reply: string, runTimeoutMs?: number) {
 		heartbeatPath: test.runtime.paths.heartbeat,
 		notify: (title, body) => notes.push(`${title}: ${body}`),
 		log: () => {},
-		runTimeoutMs,
+		...options,
 	});
+	test.runtime.tools.register(scheduler.respondTool);
 	return { ...test, scheduler, notes };
 }
 
 const minutes = (base: string, n: number) => new Date(Date.parse(base) + n * 60_000);
+/** One patrol: the heartbeat_respond call, then the closing reply. */
+const patrol = (args: JsonObject) => [
+	fauxAssistantMessage([fauxToolCall("heartbeat_respond", args)], { stopReason: "toolUse" }),
+	fauxAssistantMessage("巡逻完成"),
+];
 const slowReply = async () => {
 	await sleep(300);
 	return fauxAssistantMessage("太慢了");
@@ -76,25 +83,86 @@ describe("scheduler", () => {
 		expect(notes).toEqual([]);
 	});
 
-	it("keeps a quiet heartbeat quiet and reuses its session", async () => {
-		const { runtime, scheduler, notes } = await scheduled(`一切正常 ${HEARTBEAT_OK}`);
+});
+
+describe("heartbeat", () => {
+	it("starts every patrol clean, carrying only the last note, and stays quiet", async () => {
+		const { runtime, faux, scheduler, notes } = await scheduled("x");
 		writeFileSync(runtime.paths.heartbeat, "# 注释\n- 检查邮件\n");
+		let second: Context["messages"] = [];
+		faux.setResponses([
+			...patrol({ notify: false, scratch: "已提醒过: 邮件 A" }),
+			(context) => {
+				second = [...context.messages];
+				return fauxAssistantMessage([fauxToolCall("heartbeat_respond", { notify: false })], { stopReason: "toolUse" });
+			},
+			fauxAssistantMessage("巡逻完成"),
+		]);
 		const task = runtime.schedule.add({ title: "巡逻", prompt: "", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
 		await scheduler.tick(minutes(task.createdAt, 6));
 		await scheduler.tick(minutes(task.createdAt, 11));
+
 		const updated = runtime.schedule.get(task.id);
-		expect(updated?.lastStatus).toBe("ok-quiet");
+		expect(updated).toMatchObject({ lastStatus: "ok-quiet", scratch: "已提醒过: 邮件 A" });
 		expect(notes).toEqual([]);
+		// The second request holds the system prompt, the handoff note, and the new patrol; nothing of the first patrol.
+		expect(second.map((message) => message.role)).toEqual(["system", "user", "user"]);
+		expect(JSON.stringify(second[1])).toContain("已提醒过: 邮件 A");
+		expect(JSON.stringify(second[2])).toContain("检查邮件");
+		// The log on disk keeps both patrols.
 		const session = runtime.store.load(updated?.sessionId ?? "");
-		expect(session?.turnCount()).toBe(2);
+		expect(session?.entries.filter((entry) => entry.type === "message" && entry.message.role === "user")).toHaveLength(2);
 	});
 
-	it("notifies when the heartbeat finds something", async () => {
-		const { runtime, scheduler, notes } = await scheduled("有一封重要邮件需要回复");
-		const task = runtime.schedule.add({ title: "巡逻", prompt: "", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
+	it("notifies with the patrol's own text", async () => {
+		const { runtime, faux, scheduler, notes } = await scheduled("x");
+		faux.setResponses(patrol({ notify: true, text: "有一封重要邮件需要回复" }));
+		const task = runtime.schedule.add({ title: "巡逻", prompt: "看邮件", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
 		await scheduler.tick(minutes(task.createdAt, 6));
 		expect(runtime.schedule.get(task.id)?.lastStatus).toBe("attention");
-		expect(notes[0]).toContain("重要邮件");
+		expect(notes).toEqual(["MiniBot 心跳: 巡逻: 有一封重要邮件需要回复"]);
+	});
+
+	it("notifies with the reply when the patrol forgets to respond", async () => {
+		const { runtime, scheduler, notes } = await scheduled("一切正常,只是 HEARTBEAT_OK 写在了中间");
+		const task = runtime.schedule.add({ title: "巡逻", prompt: "看邮件", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
+		await scheduler.tick(minutes(task.createdAt, 6));
+		expect(runtime.schedule.get(task.id)?.lastStatus).toBe("attention");
+		expect(notes[0]).toContain("一切正常");
+	});
+
+	it("skips without calling the model when there is nothing to check, or outside the active hours", async () => {
+		const empty = await scheduled("x");
+		const idle = empty.runtime.schedule.add({ title: "空", prompt: "", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
+		await empty.scheduler.tick(minutes(idle.createdAt, 6));
+		expect(empty.runtime.schedule.get(idle.id)).toMatchObject({ lastStatus: "skipped-empty", sessionId: null });
+		expect(empty.faux.getPendingResponseCount()).toBe(4);
+
+		const at = minutes(new Date().toISOString(), 6);
+		const minute = at.getHours() * 60 + at.getMinutes();
+		const night = await scheduled("x", { activeHours: { start: (minute + 60) % 1440, end: (minute + 120) % 1440 } });
+		const task = night.runtime.schedule.add({ title: "夜", prompt: "看邮件", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
+		await night.scheduler.tick(minutes(task.createdAt, 6));
+		expect(night.runtime.schedule.get(task.id)?.lastStatus).toBe("skipped-hours");
+		expect(night.faux.getPendingResponseCount()).toBe(4);
+	});
+
+	it("accepts heartbeat_respond only from the patrol in progress", async () => {
+		const { scheduler } = await scheduled("x");
+		const context = { sessionId: "s", runId: "r_other", workspace: "/w", signal: new AbortController().signal };
+		expect(await scheduler.respondTool.execute({ notify: false }, context)).toMatchObject({ ok: false, code: "invalid_args" });
+	});
+
+	it("parses active hours, including a window past midnight", () => {
+		expect(parseActiveHours("08:00-23:00")).toEqual({ start: 480, end: 1380 });
+		expect(parseActiveHours(undefined)).toBeUndefined();
+		const night = parseActiveHours("22:00-06:30")!;
+		expect(inActiveHours(night, new Date(2026, 0, 1, 23, 0))).toBe(true);
+		expect(inActiveHours(night, new Date(2026, 0, 1, 6, 30))).toBe(false);
+		expect(inActiveHours(night, new Date(2026, 0, 1, 12, 0))).toBe(false);
+		expect(() => parseActiveHours("8-23")).toThrow();
+		expect(() => parseActiveHours("08:00-08:00")).toThrow();
+		expect(() => parseActiveHours("08:60-09:00")).toThrow();
 	});
 });
 
@@ -122,7 +190,7 @@ describe("scheduler robustness", () => {
 	});
 
 	it("cancels a hung run, and notifies once per failure streak", async () => {
-		const { runtime, faux, scheduler, notes } = await scheduled("x", 50);
+		const { runtime, faux, scheduler, notes } = await scheduled("x", { runTimeoutMs: 50 });
 		faux.setResponses([slowReply, slowReply, fauxAssistantMessage("恢复了")]);
 		const task = runtime.schedule.add({ title: "慢", prompt: "p", kind: "cron", expr: "*/5 * * * *", workspace: "/w" });
 		await scheduler.tick(minutes(task.createdAt, 6));

@@ -100,7 +100,9 @@ async function run(config: Config): Promise<number> {
 			heartbeatPath: layout.heartbeat,
 			notify: macosNotify,
 			log,
+			activeHours: config.heartbeatHours,
 		});
+		runtime.tools.register(scheduler.respondTool);
 		const controller = new AbortController();
 		process.on("SIGINT", () => controller.abort());
 		process.on("SIGTERM", () => controller.abort());

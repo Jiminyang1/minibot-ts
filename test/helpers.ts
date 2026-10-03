@@ -37,6 +37,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
 		approval: "ask",
 		maxIterations: 20,
 		maxRetries: 2,
+		heartbeatHours: undefined,
 		...overrides,
 	};
 }

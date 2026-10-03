@@ -13,7 +13,7 @@ export function scheduleTools(store: ScheduleStore): Tool[] {
 				"创建定时任务:到点后由 scheduler daemon 以无人值守方式执行 prompt,结果通过系统通知投递并存为新会话。" +
 				"周期任务用 cron(本地时间,5 字段,如每天 8 点 = '0 8 * * *');一次性提醒用 at(本地 ISO 时间,如 '2026-07-07T09:00')。" +
 				"cron 与 at 恰好提供一个。prompt 要写成自包含指令——运行时没有当前对话的上下文。" +
-				"heartbeat=true 时创建心跳巡逻:按 cron 周期在同一个持久会话里读 HEARTBEAT.md 清单自主检查,没事保持静默,prompt 变为可选的常设指令。",
+				"heartbeat=true 时创建心跳巡逻:按 cron 周期检查 HEARTBEAT.md 清单,每次从干净的上下文开始,只带上次巡逻留下的笔记;没事保持静默,prompt 变为可选的常设指令。",
 			// Creating future autonomous runs is a sensitive act.
 			requiresApproval: true,
 			parameters: Type.Object({

@@ -1,11 +1,18 @@
 // Fire scheduled prompts as unattended runs.
 //
 // A cron or one-shot task runs in a fresh session (searchable later with
-// search_history) and its reply arrives as a desktop notification. A
-// heartbeat patrols in one persistent session, checks the HEARTBEAT.md
-// checklist, and stays quiet unless something needs the user. Missed
+// search_history) and its reply arrives as a desktop notification. Missed
 // firings within the grace window catch up; older ones are recorded and
 // skipped. Nobody is there to approve, so sensitive tools are denied.
+//
+// A heartbeat patrols the HEARTBEAT.md checklist and stays quiet unless
+// something needs the user. Every patrol starts from a clean context in its
+// one session (a reset whose handoff is the note the last patrol left), so
+// its cost stays flat however long it runs. It ends by calling
+// heartbeat_respond: notify or not, and the note for the next patrol. A
+// patrol that forgets to respond notifies with its reply, so no alert is
+// lost. An empty checklist, or a time outside the active hours, skips the
+// patrol without calling the model.
 //
 // The daemon runs unattended for months, so every failure stays contained:
 // one broken task is switched off without stopping the others, a run that
@@ -15,15 +22,20 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { Type } from "typebox";
+import { type ActiveHours, inActiveHours } from "../config.ts";
 import type { AgentSession } from "../runtime/agent-session.ts";
 import { makeRunId, RunCancelledError } from "../runtime/agent-session.ts";
+import { estimateMessageTokens } from "../runtime/context.ts";
 import type { SessionStore } from "../session/store.ts";
+import { failure, success } from "../tools/result.ts";
+import { defineTool, type Tool } from "../tools/tool.ts";
 import { errorMessage, errorName, preview } from "../util.ts";
 import { nextRun, type ScheduledTask, type ScheduleStore, shortLocal } from "./schedule.ts";
 
-export const HEARTBEAT_OK = "HEARTBEAT_OK";
 const GRACE_MS = 60 * 60 * 1000;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_SCRATCH_CHARS = 2_000;
 
 const HEARTBEAT_TEMPLATE = `# Heartbeat 巡逻清单
 #
@@ -34,7 +46,7 @@ const HEARTBEAT_TEMPLATE = `# Heartbeat 巡逻清单
 # - 如果 30 分钟内有日程开始,提醒我
 # - 看看 ~/Downloads 里有没有超过一周没整理的文件
 #
-# 清单为空时心跳会安静地跳过。
+# 清单为空时心跳会跳过,不调用模型。
 `;
 
 export type Notifier = (title: string, body: string) => void;
@@ -46,6 +58,12 @@ export const macosNotify: Notifier = (title, body) => {
 	execFile("osascript", ["-e", script], { timeout: 10_000 }, () => {});
 };
 
+interface HeartbeatResponse {
+	notify: boolean;
+	text: string;
+	scratch: string | undefined;
+}
+
 export interface SchedulerDeps {
 	schedule: ScheduleStore;
 	session: AgentSession;
@@ -55,16 +73,45 @@ export interface SchedulerDeps {
 	log: (message: string) => void;
 	/** A run that takes longer is cancelled; default RUN_TIMEOUT_MS. */
 	runTimeoutMs?: number;
+	/** Heartbeats outside this window are skipped. */
+	activeHours?: ActiveHours;
 }
 
 export class Scheduler {
 	readonly #deps: SchedulerDeps;
+	/** The patrol in progress: only its run may respond. */
+	#patrol: { runId: string; response: HeartbeatResponse | undefined } | undefined;
+	/** How a patrol reports; the daemon registers it. */
+	readonly respondTool: Tool;
 
 	constructor(deps: SchedulerDeps) {
 		this.#deps = deps;
+		this.respondTool = defineTool({
+			name: "heartbeat_respond",
+			label: "心跳 · 回报",
+			description:
+				"只在心跳巡逻里使用:巡逻结束前调用一次,报告结果。notify=true 时 text 写给用户的提醒(会作为系统通知发出);没有需要用户注意的事就 notify=false。" +
+				`scratch 可选,写下次巡逻需要记住的事(例如已经提醒过的事项,避免重复提醒),会整段替换旧笔记,最多 ${MAX_SCRATCH_CHARS} 字。`,
+			parameters: Type.Object({
+				notify: Type.Boolean({ description: "是否通知用户" }),
+				text: Type.Optional(Type.String({ description: "notify=true 时给用户的提醒" })),
+				scratch: Type.Optional(Type.String({ description: "留给下次巡逻的笔记,整段替换" })),
+			}),
+			execute: (args, context) => {
+				const patrol = this.#patrol;
+				if (patrol?.runId !== context.runId) return failure("invalid_args", "heartbeat_respond 只能在心跳巡逻中使用。");
+				const text = args.text?.trim() ?? "";
+				if (args.notify && !text) return failure("invalid_args", "notify=true 时 text 不能为空。");
+				if (args.scratch !== undefined && args.scratch.length > MAX_SCRATCH_CHARS) {
+					return failure("invalid_args", `scratch 有 ${args.scratch.length} 字,超过上限 ${MAX_SCRATCH_CHARS};请精简后重新调用。`);
+				}
+				patrol.response = { notify: args.notify, text, scratch: args.scratch?.trim() };
+				return success(args.notify ? "已记录:会通知用户。" : "已记录:保持安静。");
+			},
+		});
 	}
 
-	/** Fire every task that is due at `now`; returns the ids fired. `stop` cancels the running task. */
+	/** Handle every task that is due at `now`; returns their ids. `stop` cancels the running task. */
 	async tick(now = new Date(), stop?: AbortSignal): Promise<string[]> {
 		const fired: string[] = [];
 		for (const task of this.#deps.schedule.list()) {
@@ -121,32 +168,52 @@ export class Scheduler {
 	}
 
 	async #heartbeat(task: ScheduledTask, now: Date, stop: AbortSignal | undefined): Promise<void> {
-		this.#deps.log(`心跳巡逻: ${task.title}`);
-		let session = task.sessionId ? this.#deps.store.load(task.sessionId) : undefined;
-		if (!session) {
-			session = this.#deps.store.create(`[心跳] ${task.title}`);
-			this.#deps.schedule.update(task.id, { sessionId: session.id });
-		}
-		const checklist = this.#checklist();
-		const lines = [
-			`[心跳巡逻 · ${shortLocal(now)} · 无人值守:不要提问,敏感工具默认被拒。]`,
-			"逐项检查下面的巡逻清单,该做的直接做;只有真正需要用户注意的事才写进回复。",
-			`如果没有任何需要用户注意的事,回复中必须包含 ${HEARTBEAT_OK}(可以附一句简短原因)——这会让通知保持安静。`,
-		];
-		if (task.prompt.trim()) lines.push(`附加常设指令: ${task.prompt.trim()}`);
-		lines.push(
-			checklist
-				? `巡逻清单如下(已从 HEARTBEAT.md 内联,不需要再去读清单文件):\n${checklist}`
-				: `巡逻清单为空(用户可以编辑 ${this.#deps.heartbeatPath}),直接回复 ${HEARTBEAT_OK}。`,
-		);
-		const reply = await this.#run(task, session.id, lines.join("\n"), "heartbeat", now, stop);
-		if (reply === undefined) return;
-		if (reply.includes(HEARTBEAT_OK)) {
-			this.#mark(task, "ok-quiet", now, 0);
+		const { activeHours, schedule, store } = this.#deps;
+		if (activeHours && !inActiveHours(activeHours, now)) {
+			this.#mark(task, "skipped-hours", now, task.failures);
 			return;
 		}
-		this.#mark(task, "attention", now, 0);
-		this.#deps.notify(`MiniBot 心跳: ${task.title}`, preview(reply, 160) || "(有情况,详见会话)");
+		const checklist = this.#checklist();
+		const standing = task.prompt.trim();
+		if (!checklist && !standing) {
+			this.#mark(task, "skipped-empty", now, task.failures);
+			return;
+		}
+		this.#deps.log(`心跳巡逻: ${task.title}`);
+		let session = task.sessionId ? store.load(task.sessionId) : undefined;
+		if (!session) {
+			session = store.create(`[心跳] ${task.title}`);
+			schedule.update(task.id, { sessionId: session.id });
+		}
+		const handoff = task.scratch ? `上次巡逻留下的笔记:\n${task.scratch}` : "上次巡逻没有留下笔记。";
+		store.reset(session, handoff, session.messages().reduce((sum, message) => sum + estimateMessageTokens(message), 0));
+		const lines = [
+			`[心跳巡逻 · ${shortLocal(now)} · 无人值守:不要提问,敏感工具默认被拒。]`,
+			"逐项检查下面的内容,该查的直接查。",
+			"结束前必须调用一次 heartbeat_respond:有真正需要用户注意的事就 notify=true 并写清提醒;没有就 notify=false。已经提醒过、情况也没变的事不要重复提醒,用 scratch 记下来。",
+		];
+		if (standing) lines.push(`常设指令: ${standing}`);
+		if (checklist) lines.push(`巡逻清单(来自 HEARTBEAT.md,已内联):\n${checklist}`);
+		const runId = makeRunId();
+		this.#patrol = { runId, response: undefined };
+		let reply: string | undefined;
+		let response: HeartbeatResponse | undefined;
+		try {
+			reply = await this.#run(task, session.id, lines.join("\n"), "heartbeat", now, stop, runId);
+			response = this.#patrol.response;
+		} finally {
+			this.#patrol = undefined;
+		}
+		if (reply === undefined) return;
+		const scratch = response?.scratch === undefined ? {} : { scratch: response.scratch };
+		if (response && !response.notify) {
+			this.#mark(task, "ok-quiet", now, 0, scratch);
+			return;
+		}
+		// Notify when asked, and when the patrol never answered: a lost alert costs more than an extra one.
+		if (!response) this.#deps.log(`心跳没有调用 heartbeat_respond,按需要提醒处理: ${task.title}`);
+		this.#mark(task, "attention", now, 0, scratch);
+		this.#deps.notify(`MiniBot 心跳: ${task.title}`, preview(response?.text ?? reply, 160) || "(有情况,详见会话)");
 	}
 
 	/** The reply, or undefined after recording the failure. */
@@ -157,9 +224,9 @@ export class Scheduler {
 		source: "scheduler" | "heartbeat",
 		now: Date,
 		stop: AbortSignal | undefined,
+		runId = makeRunId(),
 	): Promise<string | undefined> {
 		const { session } = this.#deps;
-		const runId = makeRunId();
 		const timeoutMs = this.#deps.runTimeoutMs ?? RUN_TIMEOUT_MS;
 		let timedOut = false;
 		const timer = setTimeout(() => {
@@ -201,8 +268,9 @@ export class Scheduler {
 			.join("\n");
 	}
 
-	#mark(task: ScheduledTask, status: string, now: Date, failures: number): void {
+	#mark(task: ScheduledTask, status: string, now: Date, failures: number, changes: Partial<ScheduledTask> = {}): void {
 		this.#deps.schedule.update(task.id, {
+			...changes,
 			lastRunAt: now.toISOString(),
 			lastStatus: status,
 			failures,
