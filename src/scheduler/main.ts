@@ -3,24 +3,47 @@
 //   minibot-daemon [--workspace DIR]           run in the foreground
 //   minibot-daemon install [--workspace DIR]   run at login under launchd (macOS)
 //   minibot-daemon uninstall                   stop running at login
+//
+// Under launchd a clean exit stays down and a failure restarts. A problem a
+// restart cannot fix (the config, a second daemon) therefore exits 0, so the
+// daemon never restarts in a loop.
 
-import { closeSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { closeSync, copyFileSync, mkdirSync, openSync, readFileSync, rmSync, statSync, truncateSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { type Config, ConfigError, loadConfig, paths } from "../config.ts";
 import { buildRuntime, resolveModel } from "../runtime/bootstrap.ts";
-import { errorMessage, sleep } from "../util.ts";
+import { errorMessage, preview } from "../util.ts";
 import { agentPath, removeAgent, startAgent, stopAgent } from "./launchd.ts";
 import { macosNotify, Scheduler } from "./scheduler.ts";
 
 const USAGE = `用法: minibot-daemon [install | uninstall] [--workspace DIR]
 
   (无)        在前台运行 scheduler
-  install     开机自动运行(macOS launchd),工作目录默认是主目录
+  install     开机自动运行(macOS launchd),工作目录默认是 $MINIBOT_HOME/workspace
   uninstall   取消开机自动运行`;
+
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+
+/** launchd only ever appends to the log; keep one previous copy and start over past the cap. */
+function rotateLog(path: string): void {
+	try {
+		if (statSync(path).size <= MAX_LOG_BYTES) return;
+		copyFileSync(path, `${path}.1`);
+		truncateSync(path, 0);
+	} catch {
+		// No log yet.
+	}
+}
+
+/** A config problem will not fix itself: report it once and exit cleanly. */
+function stopForConfig(error: ConfigError): number {
+	console.error(`配置错误: ${error.message}`);
+	macosNotify("MiniBot daemon 已停止", preview(`配置错误: ${error.message} 修好后运行 minibot-daemon install。`, 200));
+	return 0;
+}
 
 /** The pid of a live daemon holding the pid file, if any. */
 function livePid(path: string): number | undefined {
@@ -56,11 +79,14 @@ function claimPidFile(path: string): boolean {
 }
 
 async function run(config: Config): Promise<number> {
-	const log = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
 	const layout = paths(config.home);
+	const log = (message: string) => {
+		rotateLog(layout.daemonLog);
+		console.log(`${new Date().toISOString()} ${message}`);
+	};
 	if (!claimPidFile(layout.daemonPid)) {
 		// A clean exit: launchd restarts the daemon only after a failure.
-		console.error("已有 scheduler daemon 在运行,退出。");
+		log("已有 scheduler daemon 在运行,退出。");
 		return 0;
 	}
 	try {
@@ -83,6 +109,7 @@ async function run(config: Config): Promise<number> {
 		log("scheduler 已停止");
 		return 0;
 	} catch (error) {
+		if (error instanceof ConfigError) return stopForConfig(error);
 		console.error(`启动失败: ${errorMessage(error)}`);
 		return 1;
 	} finally {
@@ -94,8 +121,7 @@ async function install(config: Config): Promise<number> {
 	// A config launchd cannot run would restart and fail forever; check it first.
 	await resolveModel(builtinModels(), config);
 	const layout = paths(config.home);
-	stopAgent();
-	for (let waited = 0; livePid(layout.daemonPid) !== undefined && waited < 10_000; waited += 250) await sleep(250);
+	await stopAgent();
 	const manual = livePid(layout.daemonPid);
 	if (manual !== undefined) {
 		console.error(`有一个手动启动的 daemon 在运行(pid ${manual})。先停掉它,再安装。`);
@@ -133,13 +159,18 @@ async function main(): Promise<number> {
 		return 1;
 	}
 	if (command === "uninstall") {
-		console.log(removeAgent() ? "已取消开机自动运行,daemon 已停止。" : `没有安装(${agentPath()} 不存在)。`);
+		console.log((await removeAgent()) ? "已取消开机自动运行,daemon 已停止。" : `没有安装(${agentPath()} 不存在)。`);
 		return 0;
 	}
 	try {
-		const config = loadConfig({ workspace: parsed.values.workspace ?? (command === "install" ? homedir() : undefined) });
-		return command === "install" ? await install(config) : await run(config);
+		const config = loadConfig({ workspace: parsed.values.workspace });
+		if (command !== "install") return await run(config);
+		// Unattended runs get their own directory, not the whole home: file reads stay away from keys and other secrets.
+		const workspace = parsed.values.workspace === undefined ? join(config.home, "workspace") : config.workspace;
+		mkdirSync(workspace, { recursive: true });
+		return await install({ ...config, workspace });
 	} catch (error) {
+		if (error instanceof ConfigError && command === undefined) return stopForConfig(error);
 		console.error(error instanceof ConfigError ? `配置错误: ${error.message}` : errorMessage(error));
 		return 1;
 	}

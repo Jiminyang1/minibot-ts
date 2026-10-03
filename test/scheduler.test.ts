@@ -2,8 +2,10 @@ import { writeFileSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AGENT_LABEL, agentPlist } from "../src/scheduler/launchd.ts";
-import { cronNext, nextRun, parseCron } from "../src/scheduler/schedule.ts";
+import { cronNext, nextRun, parseCron, shortestInterval } from "../src/scheduler/schedule.ts";
 import { HEARTBEAT_OK, Scheduler } from "../src/scheduler/scheduler.ts";
+import { messageText } from "../src/session/types.ts";
+import { sleep } from "../src/util.ts";
 import { testRuntime } from "./helpers.ts";
 
 const local = (text: string) => new Date(text);
@@ -29,7 +31,7 @@ describe("cron", () => {
 	});
 });
 
-async function scheduled(reply: string) {
+async function scheduled(reply: string, runTimeoutMs?: number) {
 	const test = await testRuntime();
 	test.faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage(reply)));
 	const notes: string[] = [];
@@ -40,15 +42,22 @@ async function scheduled(reply: string) {
 		heartbeatPath: test.runtime.paths.heartbeat,
 		notify: (title, body) => notes.push(`${title}: ${body}`),
 		log: () => {},
+		runTimeoutMs,
 	});
 	return { ...test, scheduler, notes };
 }
 
+const minutes = (base: string, n: number) => new Date(Date.parse(base) + n * 60_000);
+const slowReply = async () => {
+	await sleep(300);
+	return fauxAssistantMessage("太慢了");
+};
+
 describe("scheduler", () => {
 	it("fires a due cron task in a new session and notifies", async () => {
 		const { runtime, scheduler, notes } = await scheduled("今日简报已生成");
-		const task = runtime.schedule.add({ title: "简报", prompt: "生成简报", kind: "cron", expr: "* * * * *", workspace: "/w" });
-		const now = new Date(Date.parse(task.createdAt) + 90_000);
+		const task = runtime.schedule.add({ title: "简报", prompt: "生成简报", kind: "cron", expr: "*/5 * * * *", workspace: "/w" });
+		const now = minutes(task.createdAt, 6);
 		expect(await scheduler.tick(now)).toEqual([task.id]);
 		expect(notes).toEqual(["MiniBot: 简报: 今日简报已生成"]);
 		const updated = runtime.schedule.get(task.id);
@@ -70,10 +79,9 @@ describe("scheduler", () => {
 	it("keeps a quiet heartbeat quiet and reuses its session", async () => {
 		const { runtime, scheduler, notes } = await scheduled(`一切正常 ${HEARTBEAT_OK}`);
 		writeFileSync(runtime.paths.heartbeat, "# 注释\n- 检查邮件\n");
-		const task = runtime.schedule.add({ title: "巡逻", prompt: "", kind: "heartbeat", expr: "* * * * *", workspace: "/w" });
-		const first = new Date(Date.parse(task.createdAt) + 90_000);
-		await scheduler.tick(first);
-		await scheduler.tick(new Date(first.getTime() + 60_000));
+		const task = runtime.schedule.add({ title: "巡逻", prompt: "", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
+		await scheduler.tick(minutes(task.createdAt, 6));
+		await scheduler.tick(minutes(task.createdAt, 11));
 		const updated = runtime.schedule.get(task.id);
 		expect(updated?.lastStatus).toBe("ok-quiet");
 		expect(notes).toEqual([]);
@@ -83,15 +91,69 @@ describe("scheduler", () => {
 
 	it("notifies when the heartbeat finds something", async () => {
 		const { runtime, scheduler, notes } = await scheduled("有一封重要邮件需要回复");
-		const task = runtime.schedule.add({ title: "巡逻", prompt: "", kind: "heartbeat", expr: "* * * * *", workspace: "/w" });
-		await scheduler.tick(new Date(Date.parse(task.createdAt) + 90_000));
+		const task = runtime.schedule.add({ title: "巡逻", prompt: "", kind: "heartbeat", expr: "*/5 * * * *", workspace: "/w" });
+		await scheduler.tick(minutes(task.createdAt, 6));
 		expect(runtime.schedule.get(task.id)?.lastStatus).toBe("attention");
 		expect(notes[0]).toContain("重要邮件");
 	});
 });
 
+describe("scheduler robustness", () => {
+	it("refuses tasks that fire too often or never", async () => {
+		const { runtime } = await scheduled("x");
+		const add = (expr: string) => runtime.schedule.add({ title: "t", prompt: "p", kind: "cron", expr, workspace: "/w" });
+		expect(() => add("* * * * *")).toThrow("太频繁");
+		expect(() => add("0,2 8 * * *")).toThrow("太频繁");
+		expect(() => add("0 0 30 2 *")).toThrow("找不到");
+		expect(add("*/5 * * * *").kind).toBe("cron");
+		expect(shortestInterval("0 8 * * 1-5")).toBe(24 * 60);
+	});
+
+	it("switches off a broken task without stopping the others", async () => {
+		const { runtime, scheduler, notes } = await scheduled("完成");
+		const broken = runtime.schedule.add({ title: "坏", prompt: "p", kind: "cron", expr: "0 8 * * *", workspace: "/w" });
+		runtime.schedule.update(broken.id, { expr: "0 0 30 2 *" }); // as if edited by hand
+		const good = runtime.schedule.add({ title: "好", prompt: "p", kind: "cron", expr: "*/5 * * * *", workspace: "/w" });
+		expect(await scheduler.tick(minutes(good.createdAt, 6))).toEqual([good.id]);
+		expect(runtime.schedule.get(broken.id)).toMatchObject({ enabled: false });
+		expect(runtime.schedule.get(broken.id)?.lastStatus).toMatch(/^invalid: /);
+		expect(await scheduler.tick(minutes(good.createdAt, 11))).toEqual([good.id]);
+		expect(notes.filter((note) => note.includes("已停用"))).toHaveLength(1);
+	});
+
+	it("cancels a hung run, and notifies once per failure streak", async () => {
+		const { runtime, faux, scheduler, notes } = await scheduled("x", 50);
+		faux.setResponses([slowReply, slowReply, fauxAssistantMessage("恢复了")]);
+		const task = runtime.schedule.add({ title: "慢", prompt: "p", kind: "cron", expr: "*/5 * * * *", workspace: "/w" });
+		await scheduler.tick(minutes(task.createdAt, 6));
+		expect(runtime.schedule.get(task.id)).toMatchObject({ lastStatus: "timeout", failures: 1 });
+		await scheduler.tick(minutes(task.createdAt, 11));
+		expect(runtime.schedule.get(task.id)).toMatchObject({ lastStatus: "timeout", failures: 2 });
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("任务失败");
+		await scheduler.tick(minutes(task.createdAt, 16));
+		expect(runtime.schedule.get(task.id)).toMatchObject({ lastStatus: "success", failures: 0 });
+	});
+
+	it("cancels the running task on shutdown and closes its session", async () => {
+		const { runtime, faux, scheduler, notes } = await scheduled("x");
+		faux.setResponses([slowReply]);
+		const task = runtime.schedule.add({ title: "停", prompt: "p", kind: "cron", expr: "*/5 * * * *", workspace: "/w" });
+		const stop = new AbortController();
+		const ticking = scheduler.tick(minutes(task.createdAt, 6), stop.signal);
+		await sleep(20);
+		stop.abort();
+		await ticking;
+		expect(runtime.schedule.get(task.id)).toMatchObject({ lastStatus: "cancelled", failures: 0 });
+		expect(notes).toEqual([]);
+		const session = runtime.store.list().find((meta) => meta.title.startsWith("[定时] 停"));
+		const last = runtime.store.load(session?.id ?? "")?.messages().at(-1);
+		expect(last && messageText(last)).toContain("取消");
+	});
+});
+
 describe("launchd agent", () => {
-	it("runs the daemon with absolute paths, restarts only after a failure, and escapes XML", () => {
+	it("runs the daemon in the background with absolute paths and a capped heap, restarts only after a failure, and escapes XML", () => {
 		const plist = agentPlist({
 			node: "/opt/node/bin/node",
 			script: "/code/minibot-ts/bin/minibot-daemon.js",
@@ -100,8 +162,11 @@ describe("launchd agent", () => {
 			env: { PATH: "/opt/node/bin:/usr/bin", MINIBOT_HOME: "/Users/me/.minibot" },
 		});
 		expect(plist).toContain(`<key>Label</key><string>${AGENT_LABEL}</string>`);
-		expect(plist).toMatch(/<array>\s*<string>\/opt\/node\/bin\/node<\/string>\s*<string>\/code\/minibot-ts\/bin\/minibot-daemon.js<\/string>\s*<string>--workspace<\/string>\s*<string>\/Users\/me\/R&amp;D &lt;x&gt;<\/string>\s*<\/array>/);
+		expect(plist).toMatch(/<array>\s*<string>\/opt\/node\/bin\/node<\/string>\s*<string>--max-old-space-size=512<\/string>\s*<string>\/code\/minibot-ts\/bin\/minibot-daemon.js<\/string>\s*<string>--workspace<\/string>\s*<string>\/Users\/me\/R&amp;D &lt;x&gt;<\/string>\s*<\/array>/);
 		expect(plist).toContain("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>");
+		expect(plist).toContain("<key>ProcessType</key><string>Background</string>");
+		expect(plist).toContain("<key>ThrottleInterval</key><integer>60</integer>");
+		expect(plist).toContain("<key>ExitTimeOut</key><integer>20</integer>");
 		expect(plist).toContain("<key>MINIBOT_HOME</key><string>/Users/me/.minibot</string>");
 		expect(plist).toContain("<key>StandardErrorPath</key><string>/Users/me/.minibot/daemon.log</string>");
 	});

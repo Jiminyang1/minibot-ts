@@ -108,11 +108,23 @@ macOS 工具第一次访问某个 App 时,系统会请求自动化权限。App �
 daemon 必须一直运行,任务才会触发。在 macOS 上用 launchd 让它开机自动运行:
 
 ```bash
-minibot-daemon install     # 工作目录默认是主目录,可用 --workspace 指定
+minibot-daemon install     # 工作目录默认是 $MINIBOT_HOME/workspace,可用 --workspace 指定
 minibot-daemon uninstall
 ```
 
-`install` 先检查配置和 API key,然后写入 `~/Library/LaunchAgents/local.minibot.daemon.plist` 并立即启动 daemon。daemon 异常退出时 launchd 会重启它;日志在 `$MINIBOT_HOME/daemon.log`。换了 Node 版本或移动了仓库目录后,重新运行一次 `install`。
+`install` 先检查配置和 API key,然后写入 `~/Library/LaunchAgents/local.minibot.daemon.plist` 并立即启动 daemon。换了 Node 版本或移动了仓库目录后,重新运行一次 `install`。
+
+daemon 会连续运行几个月,所以它的每一种故障都被限制在小范围内:
+
+- **不占机器资源:** 以后台优先级运行(macOS 会限制它的 CPU 和磁盘占用),堆内存上限 512 MB。
+- **不会反复重启:** 异常退出后 launchd 才重启它,而且最多每分钟一次。配置错误不是重启能解决的,daemon 会发一条通知,然后正常退出,不再重启。
+- **任务互不影响:** 一个任务的表达式坏了(比如手改 `schedule.json`),只停用这一个任务。
+- **不会卡死:** 单次运行超过 10 分钟就取消。
+- **不刷屏:** 任务连续失败时,只在第一次失败时通知。
+- **不乱跑:** 周期任务至少间隔 5 分钟;永远不会触发的表达式在创建时就被拒绝。
+- **停止时收尾:** 停止 daemon 会取消正在运行的任务,并给它的会话写上收尾记录。
+- **日志有上限:** `daemon.log` 超过 5 MB 时转存为 `daemon.log.1`,然后从头写。
+- **读不到密钥:** 默认工作目录是 `$MINIBOT_HOME/workspace`,不是主目录。无人值守的运行读不到 `~/.ssh`、`.env` 这类文件。
 
 ## 数据目录
 
@@ -129,6 +141,7 @@ minibot-daemon uninstall
   runs.jsonl                每次运行一行摘要
   mcp.json                  MCP server 配置
   daemon.pid / daemon.log   正在运行的 daemon 和它的日志
+  workspace/                daemon 的默认工作目录
   evals/                    本地评测结果
 ```
 

@@ -4,6 +4,11 @@
 // launchd starts jobs with a bare environment, so the agent carries absolute
 // paths (node, the daemon script, the workspace) and the PATH that MCP
 // servers launched through npx or uvx need.
+//
+// The agent must never weigh on the machine: it runs at background priority
+// (macOS throttles its CPU and disk use), its heap is capped so a leak ends
+// in a restart instead of swapping, launchd restarts it at most once a
+// minute, and on shutdown it gets time to close its work cleanly.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -11,6 +16,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const AGENT_LABEL = "local.minibot.daemon";
+const MAX_HEAP_MB = 512;
 
 export interface AgentSpec {
 	node: string;
@@ -33,7 +39,7 @@ export function agentPlist(spec: AgentSpec): string {
 		`\t<key>Label</key>${string(AGENT_LABEL)}`,
 		"\t<key>ProgramArguments</key>",
 		"\t<array>",
-		...[spec.node, spec.script, "--workspace", spec.workspace].map((arg) => `\t\t${string(arg)}`),
+		...[spec.node, `--max-old-space-size=${MAX_HEAP_MB}`, spec.script, "--workspace", spec.workspace].map((arg) => `\t\t${string(arg)}`),
 		"\t</array>",
 		`\t<key>WorkingDirectory</key>${string(spec.workspace)}`,
 		"\t<key>EnvironmentVariables</key>",
@@ -41,6 +47,10 @@ export function agentPlist(spec: AgentSpec): string {
 		...env,
 		"\t</dict>",
 		"\t<key>RunAtLoad</key><true/>",
+		"\t<key>ProcessType</key><string>Background</string>",
+		"\t<key>ThrottleInterval</key><integer>60</integer>",
+		// Time to cancel the running task and flush traces before launchd kills the process.
+		"\t<key>ExitTimeOut</key><integer>20</integer>",
 		// Restart only after a failure: a clean exit (stopped, or another daemon already running) stays down.
 		"\t<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>",
 		`\t<key>StandardOutPath</key>${string(spec.log)}`,
@@ -56,15 +66,31 @@ export function agentPath(): string {
 }
 
 const domain = () => `gui/${process.getuid?.() ?? 0}`;
+const service = () => `${domain()}/${AGENT_LABEL}`;
 
-/** Stop the agent if it is loaded; true when it was. */
-export function stopAgent(): boolean {
+function isLoaded(): boolean {
 	try {
-		execFileSync("launchctl", ["bootout", `${domain()}/${AGENT_LABEL}`], { stdio: "ignore" });
+		execFileSync("launchctl", ["print", service()], { stdio: "ignore" });
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+/** Stop the agent if it is loaded and wait until launchd has let go of it; true when it was loaded. */
+export async function stopAgent(): Promise<boolean> {
+	if (!isLoaded()) return false;
+	try {
+		execFileSync("launchctl", ["bootout", service()], { stdio: "ignore" });
+	} catch {
+		// Already on its way out; the wait below settles it.
+	}
+	// Loading the same label again before launchd finishes fails with "Bootstrap failed: 5".
+	for (let waited = 0; isLoaded(); waited += 250) {
+		if (waited >= 15_000) throw new Error(`launchd 没有在 15 秒内停止 ${AGENT_LABEL}。`);
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	return true;
 }
 
 /** Write the agent and load it; RunAtLoad starts the daemon right away. */
@@ -77,9 +103,9 @@ export function startAgent(spec: AgentSpec): string {
 }
 
 /** Unload and delete the agent; false when it was not installed. */
-export function removeAgent(): boolean {
+export async function removeAgent(): Promise<boolean> {
 	const path = agentPath();
-	const loaded = stopAgent();
+	const loaded = await stopAgent();
 	if (!existsSync(path)) return loaded;
 	rmSync(path);
 	return true;

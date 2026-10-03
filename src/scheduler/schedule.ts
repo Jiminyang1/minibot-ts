@@ -3,6 +3,8 @@
 // Cron expressions are evaluated in local time: "every day at 8" means the
 // user's 8 o'clock. Five fields with `*`, numbers, lists, ranges, and `/step`;
 // day-of-month and day-of-week combine with OR when both are restricted.
+// Every task must fire, and recurring ones at most every MIN_INTERVAL_MINUTES:
+// each firing is a model call.
 
 import { isRecord, nowIso, readJsonFile, shortId, withFileLock, writeFileAtomic } from "../util.ts";
 
@@ -19,6 +21,8 @@ export interface ScheduledTask {
 	createdAt: string;
 	lastRunAt: string | null;
 	lastStatus: string | null;
+	/** Failed runs in a row; only the first one of a streak notifies. */
+	failures: number;
 	workspace: string;
 	/** Heartbeat only: the session every patrol reuses. */
 	sessionId: string | null;
@@ -117,6 +121,20 @@ export function cronNext(expr: string, after: Date): Date {
 	throw new Error(`一年内找不到下一次触发时间: "${expr}"`);
 }
 
+export const MIN_INTERVAL_MINUTES = 5;
+
+/** The shortest gap between consecutive firings, over the next 50 of them. Throws when it never fires. */
+export function shortestInterval(expr: string, from = new Date()): number {
+	let previous = cronNext(expr, from);
+	let shortest = Number.POSITIVE_INFINITY;
+	for (let i = 0; i < 50; i++) {
+		const next = cronNext(expr, previous);
+		shortest = Math.min(shortest, (next.getTime() - previous.getTime()) / 60_000);
+		previous = next;
+	}
+	return shortest;
+}
+
 /** ISO timestamp; without a zone it is local time. Requires a time of day. */
 function parseLocalTime(text: string): Date {
 	if (!/\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}/.test(text)) throw new Error(`时间格式无效: "${text}",例如 2026-07-07T09:00`);
@@ -147,6 +165,7 @@ function isTask(value: unknown): value is ScheduledTask {
 		typeof value.prompt === "string" &&
 		typeof value.expr === "string" &&
 		typeof value.createdAt === "string" &&
+		typeof value.failures === "number" &&
 		(value.kind === "cron" || value.kind === "once" || value.kind === "heartbeat")
 	);
 }
@@ -169,7 +188,12 @@ export class ScheduleStore {
 
 	add(input: { title: string; prompt: string; kind: TaskKind; expr: string; workspace: string }): ScheduledTask {
 		if (input.kind === "once") parseLocalTime(input.expr);
-		else parseCron(input.expr);
+		else {
+			const interval = shortestInterval(input.expr);
+			if (interval < MIN_INTERVAL_MINUTES) {
+				throw new Error(`"${input.expr}" 最短每 ${interval} 分钟触发一次,太频繁;至少间隔 ${MIN_INTERVAL_MINUTES} 分钟。`);
+			}
+		}
 		const task: ScheduledTask = {
 			id: shortId("t", 5),
 			title: input.title.trim() || input.prompt.slice(0, 30),
@@ -180,6 +204,7 @@ export class ScheduleStore {
 			createdAt: nowIso(),
 			lastRunAt: null,
 			lastStatus: null,
+			failures: 0,
 			workspace: input.workspace,
 			sessionId: null,
 		};
