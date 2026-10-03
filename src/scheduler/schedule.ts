@@ -118,7 +118,7 @@ export function cronNext(expr: string, after: Date): Date {
 }
 
 /** ISO timestamp; without a zone it is local time. Requires a time of day. */
-export function parseLocalTime(text: string): Date {
+function parseLocalTime(text: string): Date {
 	if (!/\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}/.test(text)) throw new Error(`时间格式无效: "${text}",例如 2026-07-07T09:00`);
 	const date = new Date(text.replace(" ", "T"));
 	if (Number.isNaN(date.getTime())) throw new Error(`时间格式无效: "${text}"`);

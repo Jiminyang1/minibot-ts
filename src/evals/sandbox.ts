@@ -62,7 +62,7 @@ function cannedMacos(tool: Tool, results: Record<string, unknown>): Tool {
 	});
 }
 
-export function installStandIns(registry: ToolRegistry, results: Record<string, unknown>): void {
+function installStandIns(registry: ToolRegistry, results: Record<string, unknown>): void {
 	for (const tool of macosTools) registry.register(cannedMacos(tool, results));
 	registry.register(
 		standIn(execTool, (args) => {
@@ -104,7 +104,7 @@ function snapshot(workspace: string): Record<string, string> {
 }
 
 /** Reduce a run's events to what the scorers need. */
-export function summarizeEvents(events: RuntimeEvent[]): Pick<CaseOutput, "toolCalls" | "skillsRead" | "modelCalls" | "inputTokens" | "outputTokens"> {
+function summarizeEvents(events: RuntimeEvent[]): Pick<CaseOutput, "toolCalls" | "skillsRead" | "modelCalls" | "inputTokens" | "outputTokens"> {
 	const calls = new Map<string, ToolCallRecord>();
 	let modelCalls = 0;
 	let inputTokens = 0;

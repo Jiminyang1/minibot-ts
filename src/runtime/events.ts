@@ -75,8 +75,6 @@ export type RuntimeEvent = {
 	};
 }[EventType];
 
-export type EventOf<K extends EventType> = Extract<RuntimeEvent, { type: K }>;
-
 export type EventHandler = (event: RuntimeEvent) => void;
 
 /** Monotonic per-run events, delivered to every handler in order. */

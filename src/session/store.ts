@@ -24,7 +24,7 @@ export class SessionNotFoundError extends Error {
 	override name = "SessionNotFoundError";
 }
 
-export function validSessionId(id: string): boolean {
+function validSessionId(id: string): boolean {
 	return SESSION_ID.test(id);
 }
 

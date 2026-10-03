@@ -61,13 +61,13 @@ export function paths(home: string): Paths {
 	};
 }
 
-export function resolveHome(env: NodeJS.ProcessEnv = process.env): string {
+function resolveHome(env: NodeJS.ProcessEnv = process.env): string {
 	const raw = env.MINIBOT_HOME?.trim();
 	return resolve(raw ? raw.replace(/^~(?=$|\/)/, homedir()) : join(homedir(), ".minibot"));
 }
 
 /** Copy KEY=VALUE lines from a .env file into `env`; real variables win. */
-export function loadEnvFile(path: string, env: NodeJS.ProcessEnv = process.env): void {
+function loadEnvFile(path: string, env: NodeJS.ProcessEnv = process.env): void {
 	if (!existsSync(path)) return;
 	for (const raw of readFileSync(path, "utf8").split("\n")) {
 		const line = raw.trim();

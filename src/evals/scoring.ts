@@ -60,7 +60,7 @@ export interface StageScore {
 	comment: string;
 }
 
-export const ANSWER_PASS = 0.5;
+const ANSWER_PASS = 0.5;
 const WEEKDAYS: Record<string, number> = { mon: 0, tue: 1, wed: 2, thu: 3, fri: 4, sat: 5, sun: 6 };
 
 const pad = (n: number) => String(n).padStart(2, "0");

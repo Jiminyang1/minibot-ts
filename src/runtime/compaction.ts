@@ -85,7 +85,7 @@ function turnTokens(messages: readonly ProjectedMessage[], turnStart: number): n
 }
 
 /** A readable transcript for the summarizer; long tool results are cut. */
-export function transcript(messages: readonly ChatMessage[]): string {
+function transcript(messages: readonly ChatMessage[]): string {
 	const lines: string[] = [];
 	for (const message of messages) {
 		const text = messageText(message).trim();
@@ -100,7 +100,7 @@ export function transcript(messages: readonly ChatMessage[]): string {
 	return lines.join("\n");
 }
 
-export function summaryRequest(plan: CompactionPlan, previousSummary: string | undefined): string {
+function summaryRequest(plan: CompactionPlan, previousSummary: string | undefined): string {
 	const parts: string[] = [];
 	if (previousSummary) parts.push(`<previous_summary>\n${previousSummary.trim()}\n</previous_summary>`);
 	if (plan.toSummarize.length > 0) parts.push(`<conversation>\n${transcript(plan.toSummarize.map((item) => item.message))}\n</conversation>`);

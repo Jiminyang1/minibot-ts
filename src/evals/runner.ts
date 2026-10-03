@@ -15,7 +15,7 @@ import type { Config } from "../config.ts";
 import { type CaseInput, runCase } from "./sandbox.ts";
 import { type CaseOutput, endToEnd, type Expected, judgeAnswer, scoreDeterministic, type StageScore } from "./scoring.ts";
 
-export const DATASET = "minibot-golden";
+const DATASET = "minibot-golden";
 const CASES_PATH = fileURLToPath(new URL("../../evals/cases.json", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const STAGES = ["skill_selection", "tool_selection", "tool_args", "answer", "outcome", "end_to_end"] as const;

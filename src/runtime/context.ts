@@ -16,11 +16,11 @@ const MAX_FACT_CHARS = 240;
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
-export function localDate(date: Date): string {
+function localDate(date: Date): string {
 	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-export function utcOffset(date: Date): string {
+function utcOffset(date: Date): string {
 	const minutes = -date.getTimezoneOffset();
 	const sign = minutes >= 0 ? "+" : "-";
 	return `UTC${sign}${pad(Math.floor(Math.abs(minutes) / 60))}:${pad(Math.abs(minutes) % 60)}`;

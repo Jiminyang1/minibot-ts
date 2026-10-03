@@ -70,7 +70,7 @@ function usageDetails(usage: Usage | null): Record<string, number> | undefined {
 	};
 }
 
-export class LangfuseFold {
+class LangfuseFold {
 	readonly #runs = new Map<string, RunTrace>();
 	readonly #log: (message: string) => void;
 	#warned = false;

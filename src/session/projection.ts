@@ -20,10 +20,10 @@ export interface ProjectedMessage {
 	isSummary?: boolean;
 }
 
-export const SUMMARY_OPEN = "<conversation-summary>";
-export const SUMMARY_CLOSE = "</conversation-summary>";
+const SUMMARY_OPEN = "<conversation-summary>";
+const SUMMARY_CLOSE = "</conversation-summary>";
 
-export function summaryMessage(summary: string, timestamp: number): UserMessage {
+function summaryMessage(summary: string, timestamp: number): UserMessage {
 	return {
 		role: "user",
 		content: `${SUMMARY_OPEN}\n以下是更早对话的摘要,由系统生成,不是用户的新输入。\n\n${summary.trim()}\n${SUMMARY_CLOSE}`,
