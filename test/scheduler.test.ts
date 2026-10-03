@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { AGENT_LABEL, agentPlist } from "../src/scheduler/launchd.ts";
 import { cronNext, nextRun, parseCron } from "../src/scheduler/schedule.ts";
 import { HEARTBEAT_OK, Scheduler } from "../src/scheduler/scheduler.ts";
 import { testRuntime } from "./helpers.ts";
@@ -86,5 +87,22 @@ describe("scheduler", () => {
 		await scheduler.tick(new Date(Date.parse(task.createdAt) + 90_000));
 		expect(runtime.schedule.get(task.id)?.lastStatus).toBe("attention");
 		expect(notes[0]).toContain("重要邮件");
+	});
+});
+
+describe("launchd agent", () => {
+	it("runs the daemon with absolute paths, restarts only after a failure, and escapes XML", () => {
+		const plist = agentPlist({
+			node: "/opt/node/bin/node",
+			script: "/code/minibot-ts/bin/minibot-daemon.js",
+			workspace: "/Users/me/R&D <x>",
+			log: "/Users/me/.minibot/daemon.log",
+			env: { PATH: "/opt/node/bin:/usr/bin", MINIBOT_HOME: "/Users/me/.minibot" },
+		});
+		expect(plist).toContain(`<key>Label</key><string>${AGENT_LABEL}</string>`);
+		expect(plist).toMatch(/<array>\s*<string>\/opt\/node\/bin\/node<\/string>\s*<string>\/code\/minibot-ts\/bin\/minibot-daemon.js<\/string>\s*<string>--workspace<\/string>\s*<string>\/Users\/me\/R&amp;D &lt;x&gt;<\/string>\s*<\/array>/);
+		expect(plist).toContain("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>");
+		expect(plist).toContain("<key>MINIBOT_HOME</key><string>/Users/me/.minibot</string>");
+		expect(plist).toContain("<key>StandardErrorPath</key><string>/Users/me/.minibot/daemon.log</string>");
 	});
 });

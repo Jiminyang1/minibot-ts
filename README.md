@@ -26,7 +26,7 @@ npm link
 |---|---|
 | `minibot` | 终端界面。输入不是终端或加 `--plain` 时用行式 REPL。 |
 | `minibot-server [--port 8765]` | Web 界面和 HTTP/SSE 接口,打开 `http://127.0.0.1:8765/`。 |
-| `minibot-daemon` | 定时任务和心跳巡逻,每个数据目录只能跑一个。 |
+| `minibot-daemon` | 定时任务和心跳巡逻,每个数据目录只能跑一个。`install` 让它开机自动运行,`uninstall` 取消。 |
 
 终端界面的按键:Enter 发送,Esc 取消运行,Ctrl+O 展开或收起思考过程,Ctrl+C 清空输入(运行中则取消,空闲时退出),Ctrl+D 退出。输入 `/` 会补全命令。
 
@@ -105,6 +105,15 @@ macOS 工具第一次访问某个 App 时,系统会请求自动化权限。App �
 - 错过的触发在 1 小时内会补跑,更早的记为 missed。
 - 没有人可以审批,所以敏感工具一律拒绝。
 
+daemon 必须一直运行,任务才会触发。在 macOS 上用 launchd 让它开机自动运行:
+
+```bash
+minibot-daemon install     # 工作目录默认是主目录,可用 --workspace 指定
+minibot-daemon uninstall
+```
+
+`install` 先检查配置和 API key,然后写入 `~/Library/LaunchAgents/local.minibot.daemon.plist` 并立即启动 daemon。daemon 异常退出时 launchd 会重启它;日志在 `$MINIBOT_HOME/daemon.log`。换了 Node 版本或移动了仓库目录后,重新运行一次 `install`。
+
 ## 数据目录
 
 ```
@@ -119,6 +128,7 @@ macOS 工具第一次访问某个 App 时,系统会请求自动化权限。App �
   HEARTBEAT.md              心跳巡逻清单
   runs.jsonl                每次运行一行摘要
   mcp.json                  MCP server 配置
+  daemon.pid / daemon.log   正在运行的 daemon 和它的日志
   evals/                    本地评测结果
 ```
 

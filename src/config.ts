@@ -43,6 +43,7 @@ export interface Paths {
 	heartbeat: string;
 	evals: string;
 	daemonPid: string;
+	daemonLog: string;
 }
 
 export function paths(home: string): Paths {
@@ -58,6 +59,7 @@ export function paths(home: string): Paths {
 		heartbeat: join(home, "HEARTBEAT.md"),
 		evals: join(home, "evals"),
 		daemonPid: join(home, "daemon.pid"),
+		daemonLog: join(home, "daemon.log"),
 	};
 }
 
