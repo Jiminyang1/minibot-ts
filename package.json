@@ -2,6 +2,7 @@
   "name": "minibot",
   "version": "0.1.0",
   "description": "A personal AI assistant that runs on your machine: tools, memory, skills, schedules, MCP.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "engines": {
